@@ -1,128 +1,115 @@
 use std::{
+    borrow::Cow,
     ffi::OsStr,
+    iter,
     num::NonZeroU64,
     path::Path,
     rc::Rc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use conserve::{IndexEntry, Kind, StoredTree};
+use conserve::{Apath, IndexEntry, Kind, StoredTree};
 use fuser::{FileAttr, FileType, Filesystem};
 use libc::{EINVAL, ENOENT, ENOSYS};
 use log::debug;
 
 mod dirindex;
 
-use dirindex::{DirIndex, DirIndexKey};
+use dirindex::DirIndex;
 
 type EntryRef = Rc<Entry>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct INode(NonZeroU64);
+struct INode(u64);
 
 impl INode {
     fn from_u64(ino: u64) -> Option<Self> {
-        INode(NonZeroU64::new(ino)?).into()
+        if ino == 0 {
+            return None;
+        }
+        INode(ino).into()
+    }
+
+    fn is_root(&self) -> bool {
+        self.0 == 1
     }
 }
 
 impl From<INode> for u64 {
     fn from(value: INode) -> Self {
-        value.0.get()
+        value.0
     }
 }
 
 pub struct ConserveFilesystem {
-    _tree: StoredTree,
-    entry_cache: Vec<EntryRef>,
-    dir_index: DirIndex,
-}
-
-#[inline]
-fn idx(ino: INode) -> usize {
-    (ino.0.get() - 1) as usize
+    tree: StoredTree,
+    index: DirIndex,
 }
 
 impl ConserveFilesystem {
     pub fn new(tree: StoredTree) -> Self {
-        let entry_cache = Self::entries(&tree);
         Self {
-            _tree: tree,
-            entry_cache,
-            dir_index: DirIndex::default(),
+            tree,
+            index: DirIndex::default(),
         }
-    }
-
-    fn entries(tree: &StoredTree) -> Vec<EntryRef> {
-        let mut entries: Vec<Entry> = tree
-            .band()
-            .index()
-            .iter_entries()
-            .map(|inner| Entry {
-                ino: INode(NonZeroU64::new(1).unwrap()),
-                inner,
-            })
-            .collect();
-
-        entries.sort_by(|a, b| a.path().cmp(b.path()));
-        entries
-            .into_iter()
-            .enumerate()
-            .map(|(i, mut entry)| {
-                entry.ino = INode(NonZeroU64::new(i as u64 + 1).unwrap());
-                entry.into()
-            })
-            .collect()
     }
 
     #[inline]
-    fn lookup_(&mut self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
-        self.dir_index.lookup(parent, name)
+    fn lookup_child_of(&mut self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
+        self.index.lookup_child_of(parent, name)
     }
 
-    fn load_dir(&mut self, ino: INode) -> impl Iterator<Item = (&DirIndexKey, &EntryRef)> {
-        if !self.dir_index.contains_dir(ino) {
-            let Some(parent_dir_entry) = self.entry_cache.get(idx(ino)) else {
-                return self.dir_index.parent_and_children(ino);
+    fn open_dir(&mut self, ino: INode) -> bool {
+        if !self.index.is_dir_loaded(ino) {
+            if ino.is_root() {
+                self.load_dir(ino, &Apath::root())
+            } else {
+                let Some((_, entry)) = self.index.lookup(ino) else {
+                    return false;
+                };
+                self.load_dir(ino, &entry.clone().inner.apath);
             };
-
-            // take the direct children of parent.
-            let entries = self.entry_cache[idx(ino)..]
-                .iter()
-                .skip(1)
-                .take_while(|entry| {
-                    parent_dir_entry
-                        .inner
-                        .apath
-                        .is_prefix_of(&entry.inner.apath)
-                })
-                .filter(|entry| dbg!(entry.path().parent()) == Some(dbg!(parent_dir_entry.path())))
-                .collect::<Vec<_>>();
-
-            debug!("load entries into index parent = {parent_dir_entry:?}, entries = {entries:?}");
-
-            // insert parent as (ino, "")
-            self.dir_index
-                .insert_entry((ino, String::new()), parent_dir_entry.clone());
-            for entry in entries {
-                self.dir_index.insert_entry(
-                    (
-                        ino,
-                        entry
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .to_string(),
-                    ),
-                    entry.clone(),
-                );
-            }
         }
-        self.dir_index.parent_and_children(ino)
+        true
+    }
+
+    fn load_dir(&mut self, ino: INode, dir_path: &Apath) {
+        self.tree
+            .band()
+            .index()
+            .iter_hunks()
+            .advance_to_after(dir_path)
+            .flatten()
+            .take_while(|entry| dir_path.is_prefix_of(&entry.apath))
+            .filter(|entry| {
+                let path: &Path = entry.apath.as_ref();
+                let parent_path: &Path = dir_path.as_ref();
+                dbg!(path.parent()) == Some(dbg!(parent_path))
+            })
+            .for_each(|entry| {
+                self.index.insert_entry(ino, entry);
+            });
+    }
+
+    fn list_dir(&mut self, ino: INode) -> Option<impl Iterator<Item = (&OsStr, &EntryRef)>> {
+        let (parent, dir) = self.index.lookup(ino)?;
+        let (_, parent) = self.index.lookup(*parent)?;
+
+        Some(
+            iter::once((OsStr::new("."), dir))
+                .chain(iter::once((OsStr::new(".."), parent)))
+                .chain(
+                    self.index
+                        .parent_and_children(dir.ino)
+                        .skip(1)
+                        .filter_map(|(_, entry)| (entry.file_name()?, entry).into()),
+                ),
+        )
     }
 
     fn get(&self, ino: INode) -> Option<&EntryRef> {
-        self.entry_cache.get(idx(ino))
+        let (_, entry) = self.index.lookup(ino)?;
+        entry.into()
     }
 
     fn get_dir(&self, ino: INode) -> Option<&EntryRef> {
@@ -139,7 +126,7 @@ impl Filesystem for ConserveFilesystem {
         _req: &fuser::Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
-        debug!("init");
+        self.open_dir(INode(1));
         Ok(())
     }
 
@@ -161,7 +148,6 @@ impl Filesystem for ConserveFilesystem {
             return;
         };
 
-        let _ = self.load_dir(parent);
         let Some(parent_dir) = self.get_dir(parent) else {
             reply.error(ENOENT);
             return;
@@ -169,7 +155,7 @@ impl Filesystem for ConserveFilesystem {
 
         debug!("loopkup parent dir {:?}", parent_dir);
         if let Some(file_attr) = self
-            .lookup_(parent_dir.ino, name)
+            .lookup_child_of(parent_dir.ino, name)
             .and_then(|entry| entry.file_attr())
         {
             debug!("lookup match {name:?} {file_attr:?}");
@@ -208,12 +194,11 @@ impl Filesystem for ConserveFilesystem {
             reply.error(EINVAL);
             return;
         };
-        if self.get_dir(ino).is_none() {
+        if self.open_dir(ino) {
             reply.error(ENOENT);
-            return;
+        } else {
+            reply.opened(0, 0);
         }
-        let _ = self.load_dir(ino);
-        reply.opened(0, 0);
     }
 
     fn getattr(&mut self, _req: &fuser::Request, ino: u64, reply: fuser::ReplyAttr) {
@@ -244,12 +229,13 @@ impl Filesystem for ConserveFilesystem {
             return;
         };
 
-        let entries = self.load_dir(ino);
+        let Some(entries) = self.list_dir(ino) else {
+            reply.error(ENOENT);
+            return;
+        };
 
-        for (i, ((_, ref name), entry)) in entries.enumerate().skip(offset as usize) {
+        for (i, (name, entry)) in entries.enumerate().skip(offset as usize) {
             debug!("readdir entry: {entry:?}");
-
-            let name = if name.is_empty() { "." } else { name.as_str() };
 
             let Some(file_type) = entry.file_type() else {
                 continue;
