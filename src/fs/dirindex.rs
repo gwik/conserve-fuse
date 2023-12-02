@@ -1,10 +1,20 @@
+use snafu::prelude::*;
+
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, HashMap},
     ffi::OsStr,
-    num::NonZeroU64,
 };
 
-use conserve::IndexEntry;
+#[derive(Debug, Snafu)]
+pub(super) enum Error {
+    #[snafu(display("parent node ({parent} path doesn't match"))]
+    ParentPrefixNoMatch { parent: INode },
+    #[snafu(display("parent node ({parent} not found"))]
+    ParentNotFound { parent: INode },
+}
+
+use conserve::{Apath, IndexEntry};
 
 use super::{Entry, EntryRef, INode};
 
@@ -17,19 +27,25 @@ pub(super) struct DirIndex {
     parent_index: BTreeMap<ParentIndexKey, EntryRef>,
 }
 
-impl Default for DirIndex {
-    fn default() -> Self {
-        Self {
-            next_ino: 1,
+impl DirIndex {
+    pub fn new(root_entry: IndexEntry) -> Self {
+        let mut this = Self {
+            next_ino: INode::ROOT.0 + 1,
             ino_index: HashMap::new(),
             parent_index: BTreeMap::new(),
-        }
-    }
-}
+        };
 
-impl DirIndex {
-    pub fn is_dir_loaded(&self, dir: INode) -> bool {
-        self.parent_index.contains_key(&(dir, String::new()))
+        let entry: EntryRef = Entry {
+            ino: INode::ROOT,
+            inner: root_entry,
+        }
+        .into();
+        this.ino_index
+            .insert(INode::ROOT, (INode::ROOT_PARENT, entry.clone()));
+        this.parent_index
+            .insert((INode::ROOT_PARENT, "/".into()), entry);
+
+        this
     }
 
     fn alloc_inode(&mut self) -> INode {
@@ -50,15 +66,35 @@ impl DirIndex {
     }
 
     pub fn lookup_child_of(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
+        // TODO(gwik): eliminate need to allocate.
         let key = (parent, name.to_string_lossy().to_string());
         self.parent_index.get(&key)
     }
 
-    pub fn insert_entry(&mut self, parent: INode, entry: IndexEntry) {
+    pub fn insert_entry(&mut self, parent: INode, entry: IndexEntry) -> Result<(), Error> {
         let ino = self.alloc_inode();
         let entry: EntryRef = Entry { ino, inner: entry }.into();
+        let parent_path: Cow<'_, Apath> = if parent.is_root() {
+            Cow::Owned(Apath::root())
+        } else {
+            let (_, parent_entry) = self
+                .lookup(parent)
+                .ok_or(Error::ParentNotFound { parent })?;
+            Cow::Borrowed(&parent_entry.inner.apath)
+        };
+        let key = (
+            parent,
+            entry
+                .inner
+                .apath
+                .strip_prefix(AsRef::<str>::as_ref(parent_path.as_ref()))
+                .ok_or(Error::ParentPrefixNoMatch { parent })?
+                .trim_start_matches('/')
+                .to_string(),
+        );
         self.ino_index.insert(ino, (parent, entry.clone()));
-        let key = (parent, entry.path().to_string_lossy().to_string());
         self.parent_index.insert(key, entry);
+
+        Ok(())
     }
 }
