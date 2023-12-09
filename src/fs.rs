@@ -7,7 +7,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use conserve::{Apath, IndexEntry, Kind, StoredTree};
+use conserve::{Apath, Exclude, IndexEntry, Kind, ReadTree, StoredTree};
 use fuser::{FileAttr, FileType, Filesystem};
 use libc::{EINVAL, ENOENT, ENOSYS};
 use log::{debug, error};
@@ -27,6 +27,9 @@ enum Error {
     },
     FilesystemTree {
         source: tree::Error,
+    },
+    Conserve {
+        source: conserve::Error,
     },
 }
 
@@ -121,14 +124,10 @@ impl ConserveFilesystem {
     fn load_dir(&mut self, ino: INode, dir_path: &Apath) -> Result<()> {
         let iter = self
             .tree
-            .band()
-            .index()
-            .iter_hunks()
-            // we would want to advance to after "{dir}/" , unfortunately, that's not a valid Apath
-            // .advance_to_after(dir_path)
-            .flatten()
-            // .take_while(|entry| dbg!(dir_path).is_prefix_of(dbg!(&entry.apath)))
-            .filter(|entry| {
+            .iter_entries(dir_path.clone(), Exclude::nothing())
+            .context(ConserveSnafu)?
+            .skip(1)
+            .take_while(|entry| {
                 let path: &Path = entry.apath.as_ref();
                 let parent_path: &Path = dir_path.as_ref();
                 debug!("inspect entry path = {path:?} ?==? parent path = {parent_path:?}");
