@@ -97,7 +97,7 @@ impl ConserveFilesystem {
             else {
                 return Ok(None);
             };
-            self.load_dir(parent, &parent_entry.inner.apath)?;
+            self.load_dir(parent, parent_entry.apath())?;
         }
         Ok(self.fs.lookup_child_by_name(parent, name))
     }
@@ -113,7 +113,7 @@ impl ConserveFilesystem {
             return Err(Error::NoExists { ino });
         };
         if !self.fs.is_dir_loaded(dir_entry.ino) {
-            self.load_dir(ino, &dir_entry.clone().inner.apath)?;
+            self.load_dir(ino, dir_entry.clone().apath())?;
         }
         Ok(())
     }
@@ -131,7 +131,7 @@ impl ConserveFilesystem {
             .filter(|entry| {
                 let path: &Path = entry.apath.as_ref();
                 let parent_path: &Path = dir_path.as_ref();
-                debug!("path = {path:?} ?==? parent path = {parent_path:?}");
+                debug!("inspect entry path = {path:?} ?==? parent path = {parent_path:?}");
                 path.parent() == Some(parent_path)
             });
         for entry in iter {
@@ -334,12 +334,19 @@ struct Entry {
 }
 
 impl Entry {
+    #[inline]
     fn file_type(&self) -> Option<FileType> {
         kind_to_filetype(self.inner.kind)
     }
 
+    #[inline]
     fn is_dir(&self) -> bool {
         self.inner.kind == Kind::Dir
+    }
+
+    #[inline]
+    fn apath(&self) -> &Apath {
+        &self.inner.apath
     }
 
     fn file_attr(&self) -> Option<FileAttr> {
@@ -404,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn open() {
+    fn open_root() {
         let tree = load_tree();
         let mut filesystem = ConserveFilesystem::new(tree);
         let root_ino = INode::from_u64(1).unwrap();
@@ -428,6 +435,14 @@ mod tests {
             ],
             content
         );
+    }
+
+    #[test]
+    fn open_subdir() {
+        let tree = load_tree();
+        let mut filesystem = ConserveFilesystem::new(tree);
+        let root_ino = INode::from_u64(1).unwrap();
+        filesystem.open_dir(root_ino).expect("open root dir");
 
         filesystem.open_dir(INode(4)).expect("open subdir0");
         let Some(dir_iter) = filesystem.list_dir(INode(4)) else {

@@ -1,3 +1,4 @@
+use log::trace;
 use snafu::prelude::*;
 
 use std::{
@@ -70,6 +71,10 @@ impl FilesystemTree {
     }
 
     pub fn children(&self, parent: INode) -> impl Iterator<Item = (&str, &EntryRef)> {
+        trace!(
+            "children parent = {parent} entries = {entries:?}",
+            entries = self.parent_index.get(&parent)
+        );
         self.parent_index
             .get(&parent)
             .into_iter()
@@ -106,11 +111,10 @@ impl FilesystemTree {
             if !parent_entry.is_dir() {
                 return Err(Error::NotADirectory { inode: parent });
             }
-            Cow::Borrowed(&parent_entry.inner.apath)
+            Cow::Borrowed(parent_entry.apath())
         };
         let name = entry
-            .inner
-            .apath
+            .apath()
             .strip_prefix(AsRef::<str>::as_ref(parent_path.as_ref()))
             .ok_or(Error::ParentPrefixNoMatch { parent })?
             .trim_start_matches('/')
