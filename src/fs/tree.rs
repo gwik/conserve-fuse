@@ -12,13 +12,13 @@ pub(super) enum Error {
     ParentPrefixNoMatch { parent: INode },
     #[snafu(display("parent node ({parent} not found"))]
     ParentNotFound { parent: INode },
+    #[snafu(display("node is not a directory {inode}"))]
+    NotADirectory { inode: INode },
 }
 
 use conserve::{Apath, IndexEntry};
 
 use super::{Entry, EntryRef, INode};
-
-type ParentIndexKey = (INode, String);
 
 #[derive(Debug, Clone)]
 pub(super) struct INodeEntry {
@@ -36,7 +36,7 @@ impl INodeEntry {
 pub(super) struct FilesystemTree {
     next_ino: u64,
     ino_index: HashMap<INode, INodeEntry>,
-    parent_index: BTreeMap<ParentIndexKey, EntryRef>,
+    parent_index: HashMap<INode, BTreeMap<String, EntryRef>>,
 }
 
 impl FilesystemTree {
@@ -44,7 +44,7 @@ impl FilesystemTree {
         let mut this = Self {
             next_ino: INode::ROOT.0 + 1,
             ino_index: HashMap::new(),
-            parent_index: BTreeMap::new(),
+            parent_index: HashMap::new(),
         };
 
         let entry: EntryRef = Entry {
@@ -56,8 +56,10 @@ impl FilesystemTree {
             INode::ROOT,
             INodeEntry::new(INode::ROOT_PARENT, entry.clone()),
         );
-        this.parent_index
-            .insert((INode::ROOT_PARENT, "/".into()), entry);
+        this.parent_index.insert(
+            INode::ROOT_PARENT,
+            [(String::from(""), entry)].into_iter().collect(),
+        );
 
         this
     }
@@ -67,9 +69,12 @@ impl FilesystemTree {
         INode(self.next_ino)
     }
 
-    pub fn children(&self, parent: INode) -> impl Iterator<Item = (&ParentIndexKey, &EntryRef)> {
+    pub fn children(&self, parent: INode) -> impl Iterator<Item = (&str, &EntryRef)> {
         self.parent_index
-            .range((parent, String::new())..(INode(parent.0 + 1u64), String::new()))
+            .get(&parent)
+            .into_iter()
+            .flatten()
+            .map(|(name, entry)| (name.as_str(), entry))
     }
 
     pub fn lookup(&self, ino: INode) -> Option<&INodeEntry> {
@@ -77,9 +82,9 @@ impl FilesystemTree {
     }
 
     pub fn lookup_child_of(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
-        // TODO(gwik): eliminate need to allocate.
-        let key = (parent, name.to_string_lossy().to_string());
-        self.parent_index.get(&key)
+        self.parent_index
+            .get(&parent)
+            .and_then(|entries| entries.get(name.to_string_lossy().as_ref()))
     }
 
     pub fn insert_entry(&mut self, parent: INode, entry: IndexEntry) -> Result<(), Error> {
@@ -94,21 +99,24 @@ impl FilesystemTree {
             } = self
                 .lookup(parent)
                 .ok_or(Error::ParentNotFound { parent })?;
+            if !parent_entry.is_dir() {
+                return Err(Error::NotADirectory { inode: parent });
+            }
             Cow::Borrowed(&parent_entry.inner.apath)
         };
-        let key = (
-            parent,
-            entry
-                .inner
-                .apath
-                .strip_prefix(AsRef::<str>::as_ref(parent_path.as_ref()))
-                .ok_or(Error::ParentPrefixNoMatch { parent })?
-                .trim_start_matches('/')
-                .to_string(),
-        );
+        let name = entry
+            .inner
+            .apath
+            .strip_prefix(AsRef::<str>::as_ref(parent_path.as_ref()))
+            .ok_or(Error::ParentPrefixNoMatch { parent })?
+            .trim_start_matches('/')
+            .to_string();
         self.ino_index
             .insert(ino, INodeEntry::new(parent, entry.clone()));
-        self.parent_index.insert(key, entry);
+        self.parent_index
+            .entry(parent)
+            .or_default()
+            .insert(name, entry);
 
         Ok(())
     }

@@ -144,7 +144,7 @@ impl ConserveFilesystem {
         Some(
             iter::once(dir)
                 .chain(iter::once(parent))
-                .chain(self.fs.children(ino).filter_map(|((_, name), entry)| {
+                .chain(self.fs.children(ino).filter_map(|(name, entry)| {
                     ListEntry {
                         ino: entry.ino,
                         name: name.into(),
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn open_root() {
+    fn open() {
         let tree = load_tree();
         let mut filesystem = ConserveFilesystem::new(tree);
         let root_ino = INode::from_u64(1).unwrap();
