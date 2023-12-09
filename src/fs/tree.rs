@@ -77,11 +77,15 @@ impl FilesystemTree {
             .map(|(name, entry)| (name.as_str(), entry))
     }
 
+    pub fn is_dir_loaded(&self, dir: INode) -> bool {
+        self.parent_index.contains_key(&dir)
+    }
+
     pub fn lookup(&self, ino: INode) -> Option<&INodeEntry> {
         self.ino_index.get(&ino)
     }
 
-    pub fn lookup_child_of(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
+    pub fn lookup_child_by_name(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
         self.parent_index
             .get(&parent)
             .and_then(|entries| entries.get(name.to_string_lossy().as_ref()))

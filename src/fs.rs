@@ -88,17 +88,33 @@ impl ConserveFilesystem {
         Self { tree, fs: index }
     }
 
-    #[inline]
-    fn lookup_child_of(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
-        self.fs.lookup_child_of(parent, name)
+    fn lookup_child_by_name(&mut self, parent: INode, name: &OsStr) -> Result<Option<&EntryRef>> {
+        if !self.fs.is_dir_loaded(parent) {
+            let Some(parent_entry) = self
+                .fs
+                .lookup(parent)
+                .map(|INodeEntry { parent: _, entry }| entry.clone())
+            else {
+                return Ok(None);
+            };
+            self.load_dir(parent, &parent_entry.inner.apath)?;
+        }
+        Ok(self.fs.lookup_child_by_name(parent, name))
     }
 
     fn open_dir(&mut self, ino: INode) -> Result<()> {
-        let Some(INodeEntry { parent: _, entry }) = self.fs.lookup(ino) else {
+        let Some(dir_entry) = self
+            .fs
+            .lookup(ino)
+            // FIXME(gwik): return error
+            .map(|INodeEntry { parent: _, entry }| entry)
+            .filter(|entry| entry.is_dir())
+        else {
             return Err(Error::NoExists { ino });
         };
-        // TODO(gwik): load if needed
-        self.load_dir(ino, &entry.clone().inner.apath)?;
+        if !self.fs.is_dir_loaded(dir_entry.ino) {
+            self.load_dir(ino, &dir_entry.clone().inner.apath)?;
+        }
         Ok(())
     }
 
@@ -207,16 +223,18 @@ impl Filesystem for ConserveFilesystem {
             return;
         };
 
-        debug!("loopkup parent dir {:?}", parent_dir);
-        if let Some(entry) = self.lookup_child_of(parent_dir.ino, name).map(Rc::clone) {
-            if entry.is_dir() {
-                let _fixme = self.load_dir(entry.ino, &entry.inner.apath);
+        debug!("loopkup parent dir {parent_dir:?} {name:?}");
+        match self.lookup_child_by_name(parent_dir.ino, name) {
+            Err(err) => {
+                error!("lookup child {name:?} in {parent} failed: {err}");
+                reply.error(EINVAL);
             }
-            let file_attr = entry.file_attr().unwrap();
-            debug!("lookup match {name:?} {file_attr:?}");
-            reply.entry(&TTL, &file_attr, 0);
-        } else {
-            reply.error(ENOENT);
+            Ok(None) => reply.error(ENOENT),
+            Ok(Some(entry)) => {
+                let file_attr = entry.file_attr().unwrap();
+                debug!("lookup match {name:?} {file_attr:?}");
+                reply.entry(&TTL, &file_attr, 0);
+            }
         }
     }
 
