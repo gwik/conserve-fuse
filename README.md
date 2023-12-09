@@ -1,6 +1,6 @@
 # Conserve Userland Filesystem (FUSE)
 
-This repository contains the Conserve backup archive FUSE implementation. It allows you to mount your Conserve
+This repository contains the [Conserve](https://crates.io/crates/conserve) backup archive FUSE implementation. It allows you to mount your Conserve
 backup archives as a filesystem, enabling easy access and navigation of your backed-up files and directories.
 
 **Status: Work in Progress** - Please refer to the Roadmap section for more information on current and upcoming
