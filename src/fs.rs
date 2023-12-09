@@ -17,6 +17,8 @@ mod dirindex;
 
 use dirindex::DirIndex;
 
+use self::dirindex::INodeEntry;
+
 #[derive(Debug, Snafu)]
 enum Error {
     #[snafu(display("INode {ino} does not exists"))]
@@ -92,7 +94,7 @@ impl ConserveFilesystem {
     }
 
     fn open_dir(&mut self, ino: INode) -> Result<()> {
-        let Some((_, entry)) = self.index.lookup(ino) else {
+        let Some(INodeEntry { parent: _, entry }) = self.index.lookup(ino) else {
             return Err(Error::NoExists { ino });
         };
         // TODO(gwik): load if needed
@@ -125,37 +127,34 @@ impl ConserveFilesystem {
     }
 
     fn list_dir(&self, ino: INode) -> Option<impl Iterator<Item = ListEntry<'_>>> {
-        let (parent, dir) = self.index.lookup(ino)?;
+        let INodeEntry { parent, entry: dir } = self.index.lookup(ino)?;
+        let dir = ListEntry {
+            ino: dir.ino,
+            name: ".".into(),
+            file_type: FileType::Directory,
+        };
         let parent = ListEntry {
             ino: *parent,
             name: "..".into(),
             file_type: FileType::Directory,
         };
 
-        let dir = ListEntry {
-            ino: dir.ino,
-            name: ".".into(),
-            file_type: FileType::Directory,
-        };
-
         Some(
-            iter::once(dir).chain(iter::once(parent)).chain(
-                self.index
-                    .parent_and_children(ino)
-                    .filter_map(|((_, name), entry)| {
-                        ListEntry {
-                            ino: entry.ino,
-                            name: name.into(),
-                            file_type: entry.file_type()?,
-                        }
-                        .into()
-                    }),
-            ),
+            iter::once(dir)
+                .chain(iter::once(parent))
+                .chain(self.index.children(ino).filter_map(|((_, name), entry)| {
+                    ListEntry {
+                        ino: entry.ino,
+                        name: name.into(),
+                        file_type: entry.file_type()?,
+                    }
+                    .into()
+                })),
         )
     }
 
     fn get(&self, ino: INode) -> Option<&EntryRef> {
-        let (_, entry) = self.index.lookup(ino)?;
+        let INodeEntry { parent: _, entry } = self.index.lookup(ino)?;
         entry.into()
     }
 

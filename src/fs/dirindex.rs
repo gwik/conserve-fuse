@@ -21,9 +21,21 @@ use super::{Entry, EntryRef, INode};
 type ParentIndexKey = (INode, String);
 
 #[derive(Debug, Clone)]
+pub(super) struct INodeEntry {
+    pub(super) parent: INode,
+    pub(super) entry: EntryRef,
+}
+
+impl INodeEntry {
+    fn new(parent: INode, entry: EntryRef) -> Self {
+        Self { parent, entry }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct DirIndex {
     next_ino: u64,
-    ino_index: HashMap<INode, (INode, EntryRef)>,
+    ino_index: HashMap<INode, INodeEntry>,
     parent_index: BTreeMap<ParentIndexKey, EntryRef>,
 }
 
@@ -40,8 +52,10 @@ impl DirIndex {
             inner: root_entry,
         }
         .into();
-        this.ino_index
-            .insert(INode::ROOT, (INode::ROOT_PARENT, entry.clone()));
+        this.ino_index.insert(
+            INode::ROOT,
+            INodeEntry::new(INode::ROOT_PARENT, entry.clone()),
+        );
         this.parent_index
             .insert((INode::ROOT_PARENT, "/".into()), entry);
 
@@ -53,15 +67,12 @@ impl DirIndex {
         INode(self.next_ino)
     }
 
-    pub fn parent_and_children(
-        &self,
-        parent: INode,
-    ) -> impl Iterator<Item = (&ParentIndexKey, &EntryRef)> {
+    pub fn children(&self, parent: INode) -> impl Iterator<Item = (&ParentIndexKey, &EntryRef)> {
         self.parent_index
             .range((parent, String::new())..(INode(parent.0 + 1u64), String::new()))
     }
 
-    pub fn lookup(&self, ino: INode) -> Option<&(INode, EntryRef)> {
+    pub fn lookup(&self, ino: INode) -> Option<&INodeEntry> {
         self.ino_index.get(&ino)
     }
 
@@ -77,7 +88,10 @@ impl DirIndex {
         let parent_path: Cow<'_, Apath> = if parent.is_root() {
             Cow::Owned(Apath::root())
         } else {
-            let (_, parent_entry) = self
+            let INodeEntry {
+                parent: _,
+                entry: parent_entry,
+            } = self
                 .lookup(parent)
                 .ok_or(Error::ParentNotFound { parent })?;
             Cow::Borrowed(&parent_entry.inner.apath)
@@ -92,7 +106,8 @@ impl DirIndex {
                 .trim_start_matches('/')
                 .to_string(),
         );
-        self.ino_index.insert(ino, (parent, entry.clone()));
+        self.ino_index
+            .insert(ino, INodeEntry::new(parent, entry.clone()));
         self.parent_index.insert(key, entry);
 
         Ok(())
