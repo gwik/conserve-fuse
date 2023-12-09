@@ -2,6 +2,11 @@
 name = "conserve-fuse"
 version = "0.1.0"
 edition = "2021"
+authors = [ "Antonin Amand <antonin.amand@gmail.com>" ]
+license-file = "LICENSE"
+keywords = ["backup", "mount", "fuse"]
+repository = "https://github.com/gwik/conserve-fuse"
+documentation = "https://docs.rs/conserve-fuse"
 
 [[bin]]
 name = "conserve-mount"
