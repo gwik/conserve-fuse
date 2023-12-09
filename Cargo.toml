@@ -7,6 +7,7 @@ license-file = "LICENSE"
 keywords = ["backup", "mount", "fuse"]
 repository = "https://github.com/gwik/conserve-fuse"
 documentation = "https://docs.rs/conserve-fuse"
+description = "Conserve backup tool FUSE filesystem"
 
 [[bin]]
 name = "conserve-mount"
