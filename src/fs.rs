@@ -3,7 +3,6 @@ use std::{
     ffi::OsStr,
     io, iter,
     path::Path,
-    rc::Rc,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -43,7 +42,7 @@ enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-type EntryRef = Rc<Entry>;
+type EntryRef = Arc<Entry>;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct INode(u64);

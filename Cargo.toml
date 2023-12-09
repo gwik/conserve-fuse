@@ -3,6 +3,10 @@ name = "conserve-fuse"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "conserve-mount"
+path = "src/main.rs"
+
 [dependencies]
 conserve = "23"
 libc = "0.2"
@@ -12,6 +16,7 @@ log = { version = "0.4.20", features = ["std"] }
 env_logger = "0.10.1"
 snafu = { version = "0.7.5", features = ["backtraces"] }
 bytes = "1.5.0"
+ctrlc = { version = "3.4.1", features = ["termination"] }
 
 [dev-dependencies]
 blake2-rfc = "0.2.18"
