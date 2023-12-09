@@ -33,13 +33,13 @@ impl INodeEntry {
 }
 
 #[derive(Debug, Clone)]
-pub(super) struct DirIndex {
+pub(super) struct FilesystemTree {
     next_ino: u64,
     ino_index: HashMap<INode, INodeEntry>,
     parent_index: BTreeMap<ParentIndexKey, EntryRef>,
 }
 
-impl DirIndex {
+impl FilesystemTree {
     pub fn new(root_entry: IndexEntry) -> Self {
         let mut this = Self {
             next_ino: INode::ROOT.0 + 1,

@@ -13,11 +13,11 @@ use libc::{EINVAL, ENOENT, ENOSYS};
 use log::{debug, error};
 use snafu::prelude::*;
 
-mod dirindex;
+mod tree;
 
-use dirindex::DirIndex;
+use tree::FilesystemTree;
 
-use self::dirindex::INodeEntry;
+use self::tree::INodeEntry;
 
 #[derive(Debug, Snafu)]
 enum Error {
@@ -25,8 +25,8 @@ enum Error {
     NoExists {
         ino: INode,
     },
-    DirIndex {
-        source: dirindex::Error,
+    FilesystemTree {
+        source: tree::Error,
     },
 }
 
@@ -68,7 +68,7 @@ impl From<INode> for u64 {
 
 pub struct ConserveFilesystem {
     tree: StoredTree,
-    index: DirIndex,
+    fs: FilesystemTree,
 }
 
 impl ConserveFilesystem {
@@ -83,18 +83,18 @@ impl ConserveFilesystem {
             .expect("root");
 
         assert_eq!(root_entry.apath, "/");
-        let index = DirIndex::new(root_entry);
+        let index = FilesystemTree::new(root_entry);
 
-        Self { tree, index }
+        Self { tree, fs: index }
     }
 
     #[inline]
     fn lookup_child_of(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
-        self.index.lookup_child_of(parent, name)
+        self.fs.lookup_child_of(parent, name)
     }
 
     fn open_dir(&mut self, ino: INode) -> Result<()> {
-        let Some(INodeEntry { parent: _, entry }) = self.index.lookup(ino) else {
+        let Some(INodeEntry { parent: _, entry }) = self.fs.lookup(ino) else {
             return Err(Error::NoExists { ino });
         };
         // TODO(gwik): load if needed
@@ -120,14 +120,16 @@ impl ConserveFilesystem {
             });
         for entry in iter {
             debug!("insert entry parent = {ino}, entry = {entry:?}");
-            self.index.insert_entry(ino, entry).context(DirIndexSnafu)?;
+            self.fs
+                .insert_entry(ino, entry)
+                .context(FilesystemTreeSnafu)?;
         }
 
         Ok(())
     }
 
     fn list_dir(&self, ino: INode) -> Option<impl Iterator<Item = ListEntry<'_>>> {
-        let INodeEntry { parent, entry: dir } = self.index.lookup(ino)?;
+        let INodeEntry { parent, entry: dir } = self.fs.lookup(ino)?;
         let dir = ListEntry {
             ino: dir.ino,
             name: ".".into(),
@@ -142,7 +144,7 @@ impl ConserveFilesystem {
         Some(
             iter::once(dir)
                 .chain(iter::once(parent))
-                .chain(self.index.children(ino).filter_map(|((_, name), entry)| {
+                .chain(self.fs.children(ino).filter_map(|((_, name), entry)| {
                     ListEntry {
                         ino: entry.ino,
                         name: name.into(),
@@ -154,7 +156,7 @@ impl ConserveFilesystem {
     }
 
     fn get(&self, ino: INode) -> Option<&EntryRef> {
-        let INodeEntry { parent: _, entry } = self.index.lookup(ino)?;
+        let INodeEntry { parent: _, entry } = self.fs.lookup(ino)?;
         entry.into()
     }
 
