@@ -90,6 +90,12 @@ impl FilesystemTree {
         self.ino_index.get(&ino)
     }
 
+    #[inline]
+    pub fn lookup_entry(&self, ino: INode) -> Option<&EntryRef> {
+        self.lookup(ino)
+            .map(|INodeEntry { parent: _, entry }| entry)
+    }
+
     pub fn lookup_child_by_name(&self, parent: INode, name: &OsStr) -> Option<&EntryRef> {
         self.parent_index
             .get(&parent)

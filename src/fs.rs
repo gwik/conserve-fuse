@@ -1,15 +1,17 @@
 use std::{
     borrow::Cow,
     ffi::OsStr,
-    iter,
+    io, iter,
     path::Path,
     rc::Rc,
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use conserve::{Apath, Exclude, IndexEntry, Kind, ReadTree, StoredTree};
+use bytes::{Buf, Bytes};
+use conserve::{monitor::Monitor, Apath, Exclude, IndexEntry, Kind, ReadTree, StoredTree};
 use fuser::{FileAttr, FileType, Filesystem};
-use libc::{EINVAL, ENOENT, ENOSYS};
+use libc::{EINVAL, ENOENT};
 use log::{debug, error};
 use snafu::prelude::*;
 
@@ -30,6 +32,12 @@ enum Error {
     },
     Conserve {
         source: conserve::Error,
+    },
+    Transport {
+        source: conserve::transport::Error,
+    },
+    Io {
+        source: io::Error,
     },
 }
 
@@ -86,9 +94,8 @@ impl ConserveFilesystem {
             .expect("root");
 
         assert_eq!(root_entry.apath, "/");
-        let index = FilesystemTree::new(root_entry);
-
-        Self { tree, fs: index }
+        let fs = FilesystemTree::new(root_entry);
+        Self { tree, fs }
     }
 
     fn lookup_child_by_name(&mut self, parent: INode, name: &OsStr) -> Result<Option<&EntryRef>> {
@@ -109,7 +116,6 @@ impl ConserveFilesystem {
         let Some(dir_entry) = self
             .fs
             .lookup(ino)
-            // FIXME(gwik): return error
             .map(|INodeEntry { parent: _, entry }| entry)
             .filter(|entry| entry.is_dir())
         else {
@@ -141,6 +147,39 @@ impl ConserveFilesystem {
         }
 
         Ok(())
+    }
+
+    fn read_file(&self, ino: INode, mut offset: u64) -> Result<Option<Bytes>> {
+        let Some(entry) = self.fs.lookup_entry(ino).filter(|entry| entry.is_file()) else {
+            return Ok(None);
+        };
+
+        let addr = entry
+            .inner
+            .addrs
+            .iter()
+            .find(|addr| {
+                if offset > addr.len {
+                    offset -= addr.len;
+                    false
+                } else {
+                    true
+                }
+            })
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "end of file reached before offset",
+                )
+            })
+            .context(IoSnafu)?;
+
+        let content = self
+            .tree
+            .block_dir()
+            .read_address(addr, DiscardMonitor::arc())
+            .context(ConserveSnafu)?;
+        Ok(content.slice((offset as usize)..).into())
     }
 
     fn list_dir(&self, ino: INode) -> Option<impl Iterator<Item = ListEntry<'_>>> {
@@ -248,11 +287,29 @@ impl Filesystem for ConserveFilesystem {
         lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
+        let Some(ino) = INode::from_u64(ino) else {
+            reply.error(EINVAL);
+            return;
+        };
+
+        if offset < 0 {
+            reply.error(EINVAL);
+            return;
+        }
+
         debug!(
             "read {} {} {} {} {} {:?}",
             ino, fh, offset, size, flags, lock_owner
         );
-        reply.error(ENOSYS);
+
+        match self.read_file(ino, offset as u64) {
+            Err(err) => {
+                error!("read file error: {err}");
+                reply.error(EINVAL);
+            }
+            Ok(None) => reply.error(ENOENT),
+            Ok(Some(content)) => reply.data(content.chunk()),
+        }
     }
 
     fn opendir(
@@ -344,6 +401,11 @@ impl Entry {
     }
 
     #[inline]
+    fn is_file(&self) -> bool {
+        self.inner.kind == Kind::File
+    }
+
+    #[inline]
     fn apath(&self) -> &Apath {
         &self.inner.apath
     }
@@ -351,8 +413,8 @@ impl Entry {
     fn file_attr(&self) -> Option<FileAttr> {
         FileAttr {
             ino: self.ino.into(),
-            size: 0,
-            blocks: 0,
+            size: self.inner.addrs.iter().map(|addr| addr.len).sum(),
+            blocks: self.inner.addrs.len() as u64,
             atime: UNIX_EPOCH,
             mtime: into_time(self.inner.mtime, self.inner.mtime_nanos),
             ctime: UNIX_EPOCH,
@@ -364,7 +426,12 @@ impl Entry {
             gid: 0,
             rdev: 0,
             flags: 0,
-            blksize: 512,
+            blksize: self
+                .inner
+                .addrs
+                .first()
+                .map(|addr| addr.len)
+                .unwrap_or_default() as u32,
         }
         .into()
     }
@@ -389,30 +456,52 @@ fn kind_to_filetype(kind: Kind) -> Option<FileType> {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct DiscardMonitor;
+
+impl DiscardMonitor {
+    fn arc() -> Arc<dyn Monitor> {
+        Arc::new(Self)
+    }
+}
+
+impl Monitor for DiscardMonitor {
+    fn count(&self, _counter: conserve::counters::Counter, _increment: usize) {}
+
+    fn set_counter(&self, _counter: conserve::counters::Counter, _value: usize) {}
+
+    fn problem(&self, _problem: conserve::monitor::Problem) {}
+
+    fn start_task(&self, name: String) -> conserve::monitor::task::Task {
+        conserve::monitor::task::TaskList::default().start_task(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
-    use std::path::Path;
+    use std::{ffi::OsStr, path::Path};
 
-    use conserve::{Archive, StoredTree};
+    use conserve::{Archive, BlockHash};
 
     use super::{ConserveFilesystem, INode};
 
-    fn load_tree() -> StoredTree {
+    fn load_fs(name: &str) -> ConserveFilesystem {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
         let base = Path::new(&manifest_dir);
-        let path = base.join("fixtures/backup-treeroot");
+        let path = base.join("fixtures").join(name);
         let archive = Archive::open_path(&path).expect("archive");
 
-        archive
+        let tree = archive
             .open_stored_tree(conserve::BandSelectionPolicy::LatestClosed)
-            .expect("tree")
+            .expect("tree");
+
+        ConserveFilesystem::new(tree)
     }
 
     #[test]
     fn open_root() {
-        let tree = load_tree();
-        let mut filesystem = ConserveFilesystem::new(tree);
+        let mut filesystem = load_fs("backup-treeroot");
         let root_ino = INode::from_u64(1).unwrap();
         filesystem.open_dir(root_ino).expect("open root dir");
         let Some(dir_iter) = filesystem.list_dir(root_ino) else {
@@ -438,8 +527,7 @@ mod tests {
 
     #[test]
     fn open_subdir() {
-        let tree = load_tree();
-        let mut filesystem = ConserveFilesystem::new(tree);
+        let mut filesystem = load_fs("backup-treeroot");
         let root_ino = INode::from_u64(1).unwrap();
         filesystem.open_dir(root_ino).expect("open root dir");
 
@@ -461,5 +549,54 @@ mod tests {
             ],
             content
         );
+    }
+
+    #[test]
+    fn test_read_small_file() {
+        let mut filesystem = load_fs("backup-treeroot");
+
+        filesystem.open_dir(INode::ROOT).expect("open root");
+        let child = filesystem
+            .lookup_child_by_name(INode::ROOT, OsStr::new("file0.txt"))
+            .expect("child")
+            .expect("child")
+            .clone();
+        let content = filesystem
+            .read_file(child.ino, 0)
+            .expect("read file")
+            .expect("some content");
+        let content = content.chunks(1024).take(1).next().expect("content");
+        assert_eq!(String::from_utf8_lossy(content).as_ref(), "Hello FUSE!\n");
+    }
+
+    #[test]
+    fn test_read_large_file() {
+        let mut filesystem = load_fs("backup-treeroot");
+
+        filesystem.open_dir(INode::ROOT).expect("open root");
+        let child = filesystem
+            .lookup_child_by_name(INode::ROOT, OsStr::new("words"))
+            .expect("child")
+            .expect("child")
+            .clone();
+
+        let size = child.file_attr().unwrap().size;
+        let mut hasher = blake2_rfc::blake2b::Blake2b::new(64);
+        let mut offset = 0;
+
+        while offset < size {
+            let buffer = filesystem
+                .read_file(child.ino, offset)
+                .expect("read file")
+                .expect("some content");
+            offset += buffer.len() as u64;
+            for chunk in buffer.chunks(4096) {
+                hasher.update(chunk);
+            }
+        }
+
+        let hash_result = hasher.finalize();
+        let hash = BlockHash::from(hash_result);
+        assert_eq!(hash.to_string(), "53b246febde6a54d4f9995a3c7b68a38e1dd93159a196c642fabafa09e7eec113cc4061856d12997901dbc1ba95bd7bff517a312c6de3f01b1d380ea157bc122");
     }
 }

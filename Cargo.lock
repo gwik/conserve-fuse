@@ -314,6 +314,8 @@ dependencies = [
 name = "conserve-fuse"
 version = "0.1.0"
 dependencies = [
+ "blake2-rfc",
+ "bytes",
  "clap",
  "conserve",
  "env_logger",
